@@ -1,0 +1,42 @@
+#!/usr/bin/env tclsh
+source libInformixOO.tcl
+
+# Create a connection (returns Connection object)
+set dbc [::ifx::connect "eppixprod"]
+
+# Execute SQL (returns ResultSet object)
+set resset [$dbc execute "SELECT * FROM customers"]
+
+# Get headers
+set headers [$resset headers]
+puts "Columns: $headers"
+
+# Iterate with foreach and lassign
+$resset foreach row {
+    lassign $row {*}$headers
+    puts "Customer: $name, ID: $id"
+}
+$resset close
+
+# Prepared statement
+set presql [$dbc prepare "SELECT * FROM orders WHERE customer_id = ? AND status = ?"]
+set resset [$presql execute [list 123 "active"]]
+
+$resset foreach row {
+    lassign $row {*}$headers
+    puts "Order: $order_id"
+}
+$resset close
+
+# Fetch all data at once (list of lists)
+set resset [$dbc execute "SELECT * FROM products"]
+set all_data [$resset fetchall]
+# First row is headers: [list hdr1 hdr2 ...]
+# Rest are data rows: [list [list val1 val2] [list val1 val2] ...]
+set headers [lindex $all_data 0]
+foreach row [lrange $all_data 1 end] {
+    # Process row
+}
+
+# Cleanup
+$dbc disconnect
