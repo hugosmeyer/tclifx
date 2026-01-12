@@ -1,0 +1,322 @@
+#!/opt/sup/tcl/bin/tclsh
+
+#package require tdbc::odbc
+package require ifx::odbc
+package require http 2.9.1
+
+source $env(SCRINC)/db.tcl
+source $env(SCRINC)/input.tcl
+source $env(SCRINC)/sorb.tcl
+source $env(SCRINC)/ibsprods.tcl
+source $env(SCRINC)/pp.tcl
+
+ifx::odbc::connection create db DSN=eppixprod
+
+set mfh [open $env(RECETC)/ProductMapper]
+gets $mfh inp
+
+while {![eof $mfh]} {
+    set mapper([lindex [split $inp ,] 0 ]) [lindex [split $inp ,] 1]
+    set mapper([lindex [split $inp ,] 1 ]) [lindex [split $inp ,] 0]
+    gets $mfh inp
+}
+
+set msisdns [getList [lindex $argv 0]]
+
+set explode(BF1) [list  DRR50GB ONMB1KR SMRC500 ]
+#set explode(BF1) [list  DRR50GB ONR1K SMRC500 ]
+#set explode(BF2) [list  BVB08 DRR50GB ONMB1KR SMRC5K ]
+set explode(BF2) [list  BVB08                               DRR50GB                               ONMB1KR                               SMRC5K ]
+
+set explode(BF3) [list  BFR30GB BVB03 ONR500 SMRC3K ]
+#set explode(BF4) [list  BFR20GB BVB01 BVB04 SMRC1K ]
+set explode(BF4) [list  BFR20GB BVB01 ONR200 SMRC1K ]
+
+set explode(C50) NX5G
+set explode(C51) NX10G
+set explode(C52) NX500
+set explode(C53) NX1G
+set explode(C54) NX2G
+set explode(C58) NX3G
+set explode(C59) NX20G
+set explode(C61) NX30G
+#set explode(C62) NX50G
+#set explode(C63) NX30G
+#set explode(C64) NX50G
+
+set ibsProds [array names prodPars]
+
+set exlist [list AIRTIME WIG SUL USSD LTE VOICE VOLTE EVE SUB MMS MTEVE MTSUB SHORTMS ]
+set bslist [list AIRTIME NOHSCSD HSCSD NOMMS MMS NOCONF CONFCAL CUSCLIP CUSCLIR GPRS GPRSNO NOMTEVE NOMTSUB MTSUB MTEVE DFAPN NODFAPN MEXUSUL DATPRE RSTRSUL INTCALL ROAMPRE DATPRE ROAMING DATPOST NOTACCT NOTBAL NOTDATA NOTPROM PPVCEML VCEMAIL VOLTE DSSERV DSMEM SPUL MEXUSUB MEXUCOR BASICDF ZONE DATAUNBARC AMA ONA25 ONA50 ONA350 ONA100 ONA200 ONA500 ONA1K DTA500 DTA1DAY DTA1GB DTA100 DTA10 DTA50 DTA300 DTA5 DTA2GB DTA3GB DTA10GB DTA20GB DTA5GB DT30GA DT100GA DTA100GB DT60GA DTA20 DT50GA SMAC100 SMAC200 SMAC30 SMAC50 SMAC2K SMAC500 NEA31 NEA25 NEA26 NEA27 NEA28 NEA30 WIA2GB WIA1GB WIA50 WIA300 WIA500 XTW100MB WIA100 XTW50MB WDB100 WDB50 WDB1GB WDBF1GB WDB300 WDB500 YT500MB YT300MB YT1GB YT30GB YT10GB YT100GB UPGRPR1 UNLCALPROM RT10GB RPROMOS F2D500M F2D1G RPROM6X RPROMOX RPROM8X RPROMOM RPROM4X RPROM5X RPROM7X RPROMOL RPROM2X RPROM3X RPROM9X CALBAOC DATABAR  DATAROR  DNOTIFYIN SNOTIFYIN VNOTIFYIN]
+
+set exregex [list OTAR LOYA LOYD ]
+set exregex [list LOYA LOYD ]
+set exregex [list LOYA LOYD LOYS ]
+
+if {[lsearch -exact $argv nobs  ] >= 0} {lappend exlist {*}$bslist}
+
+set noz N
+if {[lsearch -exact $argv nozero] >= 0} {set noz 1}
+
+set IBSNOProds [list MMS MTEVE MTSUB]
+
+
+set epdbprpfortrf [db prepare {select nm_network_tariff from nm_netmat where nm_internal_tariff = :trf} ]
+proc getprpfortrf {trf} {
+    global epdbprpfortrf
+    set prp {}
+    $epdbprpfortrf foreach -as lists prp {
+        set prp [lindex $prp 0]
+        return $prp
+    }
+}
+
+
+set txncnt [connectdb psorb r {select count(*) CNT from orderbase.oborderrequest r, orderbase.obopenorderequipment e where r.sorbrefnum = e.sorbrefnum and e.equipmenttype = 'MSISDN' and     r.status <> 'FUTURE DATED' and equipmentvalue = :msisdn}]
+
+puts "MSISDN,SERVICE CODE, PRODUCT,OPEN ORDERS, EPPIX PP, SORB PP, IBS PP, PACKAGE COUNT, EPPIX SUB COUNT, SORB COUNT, IBS COUNT, PROBLEM, COMMENT"
+#select "nm_network_tariff" from "nm_netmat"@ep where "nm_internal_tariff" = :trf
+set epdb [db prepare {
+select ngs_param_value1 , sbd_tariff_plan , vam_sim_no , sbd_package_code , ts_service_code
+from   vam_active_msisdn, vas_active_service, ts_tariff_service, ngs_net_group_serv, sbd_sub_dets, vst_service_types
+where  vam_subscriber_id  =  vas_subscriber_id
+and    vas_service_code   =  ts_service_code
+and    ts_net_serv_code   =  ngs_code
+and    vam_stat_code      in (1,4)
+and    vam_hierarchy      = '0'
+and    vam_msisdn_known   in ('1','2')
+and    vam_subscriber_id  =  sbd_subscriber_id
+and    sbd_package_code   =  ts_package_code
+and    sbd_tariff_plan    =  ts_internal_tariff
+and    vam_msisdn_no      = :bind_msisdn
+and    length( ngs_param_value1 ) > 0
+and    vas_service_type   = vst_service_type
+and    vst_parameterised  = 'N'
+and    vas_service_code  not in ( 'BT2','BSTL')
+}]
+
+set epdbpkg [db prepare  {
+    select
+           ts_service_code
+         , ts_net_serv_code
+         , ts_sub_charge1
+         , (select ngs_param_value1 from ngs_net_group_serv where ngs_code = ts_net_serv_code)
+    from   ts_tariff_service
+    where  ts_act_inclusive in ('M', 'D')
+    and    ts_package_code    = :bind_pkg
+    and    ts_internal_tariff = :bind_trf
+}]
+
+
+set dbeprd [db prepare  {
+    select ts_service_code, ts_act_charge, ts_internal_tariff, ts_sub_charge1, vsr_service_desc
+    from   ngs_net_group_serv, vam_active_msisdn, sbd_sub_dets, ts_tariff_service,  vsr_service
+    where  vam_msisdn_no      = :bind_msisdn
+    and    vam_subscriber_id  = sbd_subscriber_id
+    and    sbd_package_code   = ts_package_code
+    and    sbd_tariff_plan    = ts_internal_tariff
+    and    ts_net_serv_code   = ngs_code
+    and    ts_service_code    = vsr_service_code
+    and   ngs_param_value1 = :bind_prd
+
+}]
+    #--and   (ngs_param_value1 = :bind_prd or ts_service_code = :bind_prd)
+    #
+set dbibs [connectdb ibs_prod r {
+    select subscriber_type||','||service_option_id||','||recurring||','||to_char(recurring_date,'YYYY/MM/DD')||','||to_char(first_recurr_date,'YYYY/MM/DD')||','||decode(channel_id,'PROVIDENT','PROVIDENT','OTHER')
+    from subscriber_service_options,subscribers
+    where active_ind = 'A' and subscriber_service_options.msisdn = :msisdn
+    and   subscribers.msisdn = subscriber_service_options.msisdn
+    --and   channel_id in ('PROVIDENT','',null)
+}]
+
+array set eprodcode [list]
+
+foreach msisdn $msisdns {
+    if {[lsearch -exact $argv space  ] >= 0} {puts ""}
+    set emsisdn [string range $msisdn 2 end]
+    catch {array unset sorb}
+    catch {array unset pp}
+    catch {array unset sp}
+    catch {array unset ep}
+    catch {array unset ip}
+    catch {array unset ipo}
+
+    catch { array unset prodcom }
+    set eprp {}
+    set sprp {}
+    set iprp {}
+
+    orabind  $txncnt :msisdn $msisdn
+    oraexec  $txncnt
+    orafetch $txncnt -datavariable txnopn
+
+    catch {array unset ibs}
+    orabind $dbibs :msisdn $msisdn
+    oraexec $dbibs
+
+    set prods [list]
+
+    while {[orafetch $dbibs -datavariable ibs] == 0} {
+        lassign [split $ibs ,] ibs_type ibs_sopt ibs_recr ibs_rdate ibs_frdate channel_id
+        # It may look like recurring but might already be cancelled
+        ##puts ibs_rdate=--$ibs_rdate--
+        if {$ibs_frdate != "" && $ibs_recr == "F"} {
+            set ibs_recr B
+        }
+        if {[info exists PPP($ibs_sopt)]} {
+            set iprp $PPP($ibs_sopt)
+        }
+        if {[info exists prodName($ibs_type,$ibs_sopt,$ibs_recr)]} {
+            set prod $prodName($ibs_type,$ibs_sopt,$ibs_recr)
+        } else {
+            set prod UNK
+        }
+        if {$channel_id == "PROVIDENT"} {
+            incr ip($prod)
+        } else {
+            incr ipo($prod)
+        }
+        lappend prods $prod
+    }
+
+
+    catch {array unset sorb}
+    array set sorb [getSorb $msisdn]
+    if {[catch {array set sorb [getSorb $msisdn]} err]} {continue}
+
+
+    if {[info exists sorb(PP)] && [info exists sorb(SIM)]} {
+        set sprp $sorb(PP)
+        if {[info exists explode($sprp)]} {
+            foreach eprod $explode($sprp) {
+                append prodcom($eprod) " $sprp exploded"
+                incr    ep($eprod)
+                lappend prods $eprod
+            }
+        }
+        foreach prod $sorb(prod) {
+            if {[info exists explode($prod)]} {
+                foreach eprod $explode($prod) {
+                    append prodcom($eprod) " $prod exploded"
+                    incr    ep($eprod)
+                    incr    sp($eprod)
+                    lappend prods $eprod
+                }
+            }
+            incr sp($prod)
+            lappend prods $prod
+        }
+
+
+
+        # deal with NO products in SORB NOT!
+        # if the NO product does not exist, add the proper one
+        #
+        foreach prod $IBSNOProds {
+            if {[lsearch -exact $sorb(prod) $prod] >= 0} {
+                incr ip($prod)
+                lappend prods $prod
+            }
+        }
+
+
+        set bind_msisdn [string range $msisdn 2 end]
+        set pkg -
+        set trf -
+        set esim -
+        $epdb foreach -as lists res {
+            lassign $res prod trf esim pkg eprd
+            set prod [string trim $prod]
+            incr ep($prod)
+            set eprodcode($prod) $eprd
+            lappend prods $prod
+        }
+        if {[info exists trf]} {
+            set eprp [getprpfortrf $trf]
+            set eprp [string trim [lindex $eprp 0]]
+        } else {
+            set eprp UNK
+        }
+        #
+        #
+        # Figure out the package products
+        #
+        #ts_service_code"
+        #ts_net_serv_code"
+        #ts_sub_charge1"
+        #ngs_param_value1"
+
+        set bind_pkg $pkg
+        set bind_trf $trf
+
+        $epdbpkg foreach -as lists res {
+            lassign $res eprd netsrvcde chg1 prod
+            set prod [string trim $prod]
+            incr pp($prod)
+            set eprodcode($prod) $eprd
+            lappend prods $prod
+        }
+
+    }
+
+    foreach prod [lsort -unique $prods] {
+        # Check if there is a condition where IBS has a product that the others don't and the other have but the IBS don't and these two products are considered to be the same.
+            if {[info exists ip($prod)] && ![info exists ep($prod)] && ![info exists sp($prod)] } {
+                if {[info exists mapper($prod)] && ![info exists ip($mapper($prod))] && [info exists ep($mapper($prod)) ] && [info exists sp($mapper($prod)) ]} {
+                    set ep($prod) $ep($mapper($prod))
+                    set sp($prod) $sp($mapper($prod))
+                    set ep($mapper($prod)) 0
+                    set sp($mapper($prod)) 0
+                    set prodcom($prod) " $prod mapped to $mapper($prod) for EPPIX and IBS"
+                }
+            }
+
+        # Check if there is a condition where IBS has a product that the others don't and the other have but the IBS don't and these two products are considered to be the same.
+            if {[info exists ip($prod)] && [info exists ep($prod)] && ![info exists sp($prod)] } {
+                if {[info exists mapper($prod)] && [info exists sp($mapper($prod))] && ![info exists ep($mapper($prod)) ] && ![info exists ip($mapper($prod)) ]} {
+                    set sp($prod) $sp($mapper($prod))
+                    set sp($mapper($prod)) 0
+                    set prodcom($prod) " $mapper($prod) mapped to $prod for SORB"
+                }
+            }
+
+
+        if {![info exists eprodcode($prod)]} {
+
+            set eprodcode($prod) -
+            set bind_msisdn $emsisdn
+            set bind_prd    $prod
+            $dbeprd foreach -as lists res {
+                set eprodcode($prod) [lindex $res 0 ]
+            }
+        }
+        if {[lsearch -exact $exlist $prod] >= 0} {continue}
+        set skip 0
+        foreach excl $exregex {
+            if {[regexp "^${excl}" $prod ]} {set skip 1}
+        }
+        if {$skip} {continue}
+        if {[info exists pp($prod)]} { set pc $pp($prod)} else {set pc 0}
+        if {[info exists ep($prod)]} { set ec $ep($prod)} else {set ec 0}
+        if {[info exists sp($prod)]} { set sc $sp($prod)} else {set sc 0}
+        if {[info exists ip($prod)]} { set ic $ip($prod)} else {set ic 0}
+        ### HACK
+        #
+        if {$sc != 0 && $ic == 0 && [info exists ipo($prod)]} { set ic $ipo($prod)}
+        #if {[info exists ipo($prod)]} {puts $ipo($prod)}
+        #
+        if {![info exists prodcom($prod)]} {set prodcom($prod) {}}
+
+        if {[lsearch -exact $ibsProds $prod] < 0} {
+            set ic {}
+            if {$ec == $sc} {continue}
+        }
+        set errors {}
+        if {$ec != $sc || ($ec != $ic && $ic != {})} {lappend errors PROD}
+        if {[info exists sorb(SIM)] && "892700$esim" != $sorb(SIM)} { lappend errors SIM }
+        if {$eprp != $sprp || $eprp != $iprp}        {lappend errors PRP}
+        if {$noz && $ec == $sc && ($ec == $ic && $ic != {} ) && [llength $errors] == 0} {continue}
+        puts [format "%-15s, %-10s, %-20s, %-3d, %-6s, %-6s, %-6s, %-3d, %-3d, %-3d, %-3s, %-20s, %-50s," $msisdn $eprodcode($prod) $prod $txnopn $eprp $sprp $iprp $pc $ec $sc $ic $errors $prodcom($prod) ]
+    }
+}

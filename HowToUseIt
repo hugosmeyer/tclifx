@@ -1,42 +1,181 @@
 #!/usr/bin/env tclsh
-source libInformixOO.tcl
+#
+# TDBC-compatible Informix interface - ifx::odbc
+# Drop-in replacement for tdbc::odbc with Informix-specific optimizations
+#
+# Migration from tdbc::odbc:
+#   Replace: package require tdbc::odbc
+#   With:    source libIfxTdbc.tcl  (or package require ifx::odbc)
+#
+#   Replace: tdbc::odbc::connection create db ...
+#   With:    ifx::odbc::connection create db ...
+#
 
-# Create a connection (returns Connection object)
-set dbc [::ifx::connect "eppixprod"]
+source libIfxTdbc.tcl
 
-# Execute SQL (returns ResultSet object)
-set resset [$dbc execute "SELECT * FROM customers"]
+# ============================================================================
+# CONNECTION
+# ============================================================================
 
-# Get headers
-set headers [$resset headers]
-puts "Columns: $headers"
+# Create a named connection (TDBC-compatible)
+::ifx::odbc::connection create db "DSN=eppixprod"
 
-# Iterate with foreach and lassign
-$resset foreach row {
-    lassign $row {*}$headers
-    puts "Customer: $name, ID: $id"
+# Or with credentials in connection string
+::ifx::odbc::connection create db "DSN=eppixprod;UID=myuser;PWD=mypassword"
+
+# Or auto-named connection
+set db [::ifx::odbc::connection new "DSN=eppixprod"]
+
+# Connection options (TDBC-compatible)
+::ifx::odbc::connection create db "DSN=eppixprod" -readonly 1 -timeout 30
+
+# ============================================================================
+# QUERIES - Direct execution
+# ============================================================================
+
+# allrows - fetch all results at once as list of dicts
+set rows [db allrows "SELECT * FROM customers"]
+foreach row $rows {
+    puts "Customer: [dict get $row name]"
 }
-$resset close
 
-# Prepared statement
-set presql [$dbc prepare "SELECT * FROM orders WHERE customer_id = ? AND status = ?"]
-set resset [$presql execute [list 123 "active"]]
-
-$resset foreach row {
-    lassign $row {*}$headers
-    puts "Order: $order_id"
-}
-$resset close
-
-# Fetch all data at once (list of lists)
-set resset [$dbc execute "SELECT * FROM products"]
-set all_data [$resset fetchall]
-# First row is headers: [list hdr1 hdr2 ...]
-# Rest are data rows: [list [list val1 val2] [list val1 val2] ...]
-set headers [lindex $all_data 0]
-foreach row [lrange $all_data 1 end] {
-    # Process row
+# allrows -as lists - fetch as list of lists
+set rows [db allrows -as lists "SELECT id, name FROM customers"]
+foreach row $rows {
+    lassign $row id name
+    puts "ID: $id, Name: $name"
 }
 
-# Cleanup
-$dbc disconnect
+# foreach - iterate directly
+db foreach row "SELECT * FROM customers" {
+    puts "Customer: [dict get $row name], ID: [dict get $row id]"
+}
+
+# foreach with -as lists and -columnsvariable
+db foreach -as lists -columnsvariable cols row "SELECT * FROM customers" {
+    puts "Columns: $cols"
+    puts "Row: $row"
+}
+
+# ============================================================================
+# PREPARED STATEMENTS (TDBC-compatible)
+# ============================================================================
+
+# Prepare statement with positional parameters
+set stmt [db prepare "SELECT * FROM orders WHERE customer_id = ? AND status = ?"]
+
+# Execute with parameter list
+set rs [$stmt execute [list 123 "active"]]
+
+# Fetch rows
+while {[$rs nextrow row]} {
+    puts "Order: [dict get $row order_id]"
+}
+$rs close
+
+# Or use nextdict/nextlist directly
+set rs [$stmt execute [list 456 "pending"]]
+while {1} {
+    set row [$rs nextdict]
+    if {$row eq ""} break
+    puts "Order: [dict get $row order_id]"
+}
+$rs close
+
+# Statement allrows
+set orders [$stmt allrows [list 789 "complete"]]
+
+# Statement foreach
+$stmt foreach row [list 100 "active"] {
+    puts "Order: [dict get $row order_id]"
+}
+
+$stmt close
+
+# ============================================================================
+# NAMED PARAMETERS (TDBC-compatible style)
+# ============================================================================
+
+set stmt [db prepare "SELECT * FROM customers WHERE region = :region AND status = :status"]
+set rs [$stmt execute [dict create region "EMEA" status "active"]]
+
+while {[$rs nextrow -as dicts row]} {
+    puts "Customer: [dict get $row name]"
+}
+
+$rs close
+$stmt close
+
+# ============================================================================
+# RESULTSET METHODS (TDBC-compatible)
+# ============================================================================
+
+set stmt [db prepare "SELECT * FROM products"]
+set rs [$stmt execute]
+
+# Get column names
+set columns [$rs columns]
+puts "Columns: $columns"
+
+# nextrow with variable (returns 1/0)
+while {[$rs nextrow row]} {
+    # row is a dict by default
+    puts $row
+}
+
+# Or specify format
+# [$rs nextrow -as lists row]
+# [$rs nextrow -as dicts row]
+
+# Get count of rows fetched
+puts "Rows fetched: [$rs rowcount]"
+
+$rs close
+$stmt close
+
+# ============================================================================
+# METADATA (TDBC-compatible)
+# ============================================================================
+
+# List tables (pattern uses SQL LIKE syntax)
+set tables [db tables]
+set tables [db tables "cust%"]
+
+# Get column info for a table
+set cols [db columns "customers"]
+dict for {colname info} $cols {
+    puts "Column: $colname, Type: [dict get $info type]"
+}
+
+# Get primary keys
+set pks [db primarykeys "customers"]
+puts "Primary keys: $pks"
+
+# ============================================================================
+# TRANSACTIONS (TDBC-compatible)
+# ============================================================================
+
+db begintransaction
+
+# ... perform operations ...
+
+db commit
+# or: db rollback
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+# List available data sources
+set datasources [::ifx::odbc::datasources]
+set datasources [::ifx::odbc::datasources -user]
+set datasources [::ifx::odbc::datasources -system]
+
+# List available drivers
+set drivers [::ifx::odbc::drivers]
+
+# ============================================================================
+# CLEANUP
+# ============================================================================
+
+db close

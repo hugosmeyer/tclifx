@@ -1,4 +1,4 @@
-export INFORMIXDIR=/opt/sup/ifx
+export INFORMIXDIR=/opt/ifx
 export INFORMIXSQLHOSTS=${INFORMIXDIR}/etc/sqlhosts
 export INFORMIXSERVER=eppix310
 

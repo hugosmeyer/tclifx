@@ -44,30 +44,66 @@ typedef struct {
     char **col_names;
 } IfxResultSet;
 
-/* Read DSN configuration from odbc.ini */
-static int read_odbc_ini(const char *dsn, char *user, char *password, int bufsize) {
+/* DSN configuration structure */
+typedef struct {
+    char driver[512];
+    char database[256];
+    char server[256];
+    char host[256];
+    char service[64];
+    char protocol[64];
+    char user[256];
+    char password[256];
+} DsnConfig;
+
+/* Read DSN configuration from odbc.ini
+ * 
+ * Respects standard ODBC environment variables:
+ *   ODBCINI     - Path to user's odbc.ini file (default: ~/.odbc.ini)
+ *   ODBCSYSINI  - Directory containing system odbc.ini (default: /etc)
+ * 
+ * Search order:
+ *   1. $ODBCINI (if set)
+ *   2. ~/.odbc.ini
+ *   3. $ODBCSYSINI/odbc.ini
+ *   4. /etc/odbc.ini
+ */
+static int read_odbc_ini(const char *dsn, DsnConfig *config) {
     FILE *fp;
-    char *ini_paths[] = {
-        "/etc/odbc.ini",
-        NULL  /* Will be replaced with $HOME/.odbc.ini */
-    };
-    char home_ini[512];
+    char ini_paths[4][512];
+    int num_paths = 0;
     char line[1024];
     int in_section = 0;
     int found = 0;
     
-    /* Setup home path */
-    const char *home = getenv("HOME");
-    if (home) {
-        snprintf(home_ini, sizeof(home_ini), "%s/.odbc.ini", home);
-        ini_paths[1] = home_ini;
+    /* Initialize config */
+    memset(config, 0, sizeof(DsnConfig));
+    
+    /* Build list of odbc.ini paths to try */
+    
+    /* 1. ODBCINI environment variable (highest priority) */
+    const char *odbcini = getenv("ODBCINI");
+    if (odbcini && odbcini[0]) {
+        snprintf(ini_paths[num_paths++], sizeof(ini_paths[0]), "%s", odbcini);
     }
     
-    user[0] = '\0';
-    password[0] = '\0';
+    /* 2. User's home directory */
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        snprintf(ini_paths[num_paths++], sizeof(ini_paths[0]), "%s/.odbc.ini", home);
+    }
+    
+    /* 3. ODBCSYSINI directory */
+    const char *odbcsysini = getenv("ODBCSYSINI");
+    if (odbcsysini && odbcsysini[0]) {
+        snprintf(ini_paths[num_paths++], sizeof(ini_paths[0]), "%s/odbc.ini", odbcsysini);
+    }
+    
+    /* 4. Default system location */
+    snprintf(ini_paths[num_paths++], sizeof(ini_paths[0]), "/etc/odbc.ini");
     
     /* Try each ini file */
-    for (int i = 0; ini_paths[i] != NULL; i++) {
+    for (int i = 0; i < num_paths; i++) {
         fp = fopen(ini_paths[i], "r");
         if (!fp) continue;
         
@@ -100,8 +136,6 @@ static int read_odbc_ini(const char *dsn, char *user, char *password, int bufsiz
                     /* Copy key and trim */
                     strncpy(key, p, sizeof(key)-1);
                     key[sizeof(key)-1] = '\0';
-                    
-                    /* Trim key */
                     char *k = key + strlen(key) - 1;
                     while (k >= key && (*k == ' ' || *k == '\t')) *k-- = '\0';
                     
@@ -113,17 +147,31 @@ static int read_odbc_ini(const char *dsn, char *user, char *password, int bufsiz
                     char *vend = v + strlen(v) - 1;
                     while (vend >= v && (*vend == ' ' || *vend == '\t' || *vend == '\n')) *vend-- = '\0';
                     
-                    /* Check for uid/logonid */
-                    if (strcasecmp(key, "uid") == 0 || strcasecmp(key, "logonid") == 0) {
-                        strncpy(user, v, bufsize-1);
-                        user[bufsize-1] = '\0';
+                    /* Store values */
+                    if (strcasecmp(key, "driver") == 0) {
+                        snprintf(config->driver, sizeof(config->driver), "%s", v);
                         found = 1;
                     }
-                    /* Check for pwd/password */
+                    else if (strcasecmp(key, "database") == 0) {
+                        snprintf(config->database, sizeof(config->database), "%s", v);
+                    }
+                    else if (strcasecmp(key, "server") == 0 || strcasecmp(key, "servername") == 0) {
+                        snprintf(config->server, sizeof(config->server), "%s", v);
+                    }
+                    else if (strcasecmp(key, "host") == 0) {
+                        snprintf(config->host, sizeof(config->host), "%s", v);
+                    }
+                    else if (strcasecmp(key, "service") == 0 || strcasecmp(key, "port") == 0) {
+                        snprintf(config->service, sizeof(config->service), "%s", v);
+                    }
+                    else if (strcasecmp(key, "protocol") == 0) {
+                        snprintf(config->protocol, sizeof(config->protocol), "%s", v);
+                    }
+                    else if (strcasecmp(key, "uid") == 0 || strcasecmp(key, "logonid") == 0) {
+                        snprintf(config->user, sizeof(config->user), "%s", v);
+                    }
                     else if (strcasecmp(key, "pwd") == 0 || strcasecmp(key, "password") == 0) {
-                        strncpy(password, v, bufsize-1);
-                        password[bufsize-1] = '\0';
-                        found = 1;
+                        snprintf(config->password, sizeof(config->password), "%s", v);
                     }
                 }
             }
@@ -136,13 +184,58 @@ static int read_odbc_ini(const char *dsn, char *user, char *password, int bufsiz
     return 0;
 }
 
+/* Build connection string from DSN config */
+static void build_connection_string(const DsnConfig *config, const char *dsn,
+                                     const char *user, const char *password,
+                                     char *conn_str, int bufsize) {
+    int len = 0;
+    
+    /* Start with DSN */
+    len += snprintf(conn_str + len, bufsize - len, "DSN=%s;", dsn);
+    
+    /* Add database */
+    if (config->database[0]) {
+        len += snprintf(conn_str + len, bufsize - len, "DATABASE=%s;", config->database);
+    }
+    
+    /* Add server info */
+    if (config->host[0]) {
+        len += snprintf(conn_str + len, bufsize - len, "HOST=%s;", config->host);
+    }
+    if (config->server[0]) {
+        len += snprintf(conn_str + len, bufsize - len, "SERVER=%s;", config->server);
+    }
+    if (config->service[0]) {
+        len += snprintf(conn_str + len, bufsize - len, "SERVICE=%s;", config->service);
+    }
+    if (config->protocol[0]) {
+        len += snprintf(conn_str + len, bufsize - len, "PROTOCOL=%s;", config->protocol);
+    }
+    
+    /* Add credentials */
+    if (user && user[0]) {
+        len += snprintf(conn_str + len, bufsize - len, "UID=%s;", user);
+    } else if (config->user[0]) {
+        len += snprintf(conn_str + len, bufsize - len, "UID=%s;", config->user);
+    }
+    
+    if (password && password[0]) {
+        len += snprintf(conn_str + len, bufsize - len, "PWD=%s;", password);
+    } else if (config->password[0]) {
+        len += snprintf(conn_str + len, bufsize - len, "PWD=%s;", config->password);
+    }
+}
+
 /* ifx::connect dsn ?user? ?password? */
 static int IfxConnect_Cmd(ClientData clientData, Tcl_Interp *interp, 
                           int objc, Tcl_Obj *CONST objv[]) {
     IfxConnection *conn;
     SQLRETURN ret;
     char *dsn, *user = "", *password = "";
-    char user_buf[256], pwd_buf[256];
+    DsnConfig config;
+    char conn_str[2048];
+    SQLCHAR out_conn_str[1024];
+    SQLSMALLINT out_conn_len;
     char conn_name[64];
     static int conn_counter = 0;
     
@@ -153,18 +246,22 @@ static int IfxConnect_Cmd(ClientData clientData, Tcl_Interp *interp,
     
     dsn = Tcl_GetString(objv[1]);
     
-    /* Read from odbc.ini if credentials not provided */
-    if (objc < 3) {
-        if (read_odbc_ini(dsn, user_buf, pwd_buf, sizeof(user_buf))) {
-            user = user_buf;
-            password = pwd_buf;
-        }
-    } else {
-        user = Tcl_GetString(objv[2]);
-        if (objc >= 4) {
-            password = Tcl_GetString(objv[3]);
-        }
+    /* Read DSN configuration from odbc.ini */
+    if (!read_odbc_ini(dsn, &config)) {
+        /* DSN not found, use minimal connection string */
+        memset(&config, 0, sizeof(config));
     }
+    
+    /* Get user/password from arguments if provided */
+    if (objc >= 3) {
+        user = Tcl_GetString(objv[2]);
+    }
+    if (objc >= 4) {
+        password = Tcl_GetString(objv[3]);
+    }
+    
+    /* Build full connection string */
+    build_connection_string(&config, dsn, user, password, conn_str, sizeof(conn_str));
     
     /* Allocate connection structure */
     conn = (IfxConnection *)ckalloc(sizeof(IfxConnection));
@@ -190,17 +287,33 @@ static int IfxConnect_Cmd(ClientData clientData, Tcl_Interp *interp,
         return TCL_ERROR;
     }
     
-    /* Connect to database */
-    ret = SQLConnect(conn->hdbc,
-                     (SQLCHAR *)dsn, SQL_NTS,
-                     (SQLCHAR *)user, SQL_NTS,
-                     (SQLCHAR *)password, SQL_NTS);
+    /* Set connection timeout to avoid infinite hangs */
+    SQLSetConnectAttr(conn->hdbc, SQL_ATTR_CONNECTION_TIMEOUT, (SQLPOINTER)30, 0);
+    SQLSetConnectAttr(conn->hdbc, SQL_ATTR_LOGIN_TIMEOUT, (SQLPOINTER)30, 0);
+    
+    /* Connect using SQLDriverConnect with full connection string */
+    ret = SQLDriverConnect(conn->hdbc, NULL,
+                           (SQLCHAR *)conn_str, SQL_NTS,
+                           out_conn_str, sizeof(out_conn_str),
+                           &out_conn_len, SQL_DRIVER_NOPROMPT);
     
     if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        /* Get detailed error message */
+        SQLCHAR sqlstate[6], errmsg[1024];
+        SQLINTEGER native_error;
+        SQLSMALLINT errmsg_len;
+        char error_buf[1200];
+        
+        SQLGetDiagRec(SQL_HANDLE_DBC, conn->hdbc, 1, 
+                      sqlstate, &native_error, errmsg, sizeof(errmsg), &errmsg_len);
+        
+        snprintf(error_buf, sizeof(error_buf), 
+                 "Failed to connect: [%s] %s", sqlstate, errmsg);
+        
         SQLFreeHandle(SQL_HANDLE_DBC, conn->hdbc);
         SQLFreeHandle(SQL_HANDLE_ENV, conn->henv);
         ckfree((char *)conn);
-        Tcl_SetResult(interp, "Failed to connect to database", TCL_STATIC);
+        Tcl_SetResult(interp, error_buf, TCL_VOLATILE);
         return TCL_ERROR;
     }
     
@@ -251,9 +364,29 @@ static int IfxExecute_Cmd(ClientData clientData, Tcl_Interp *interp,
     
     /* Execute SQL */
     ret = SQLExecDirect(hstmt, (SQLCHAR *)sql, SQL_NTS);
-    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+    /* SQL_NO_DATA (100) is returned for DELETE/UPDATE that affect 0 rows - not an error */
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO && ret != SQL_NO_DATA) {
+        /* Get detailed error message from the database */
+        SQLCHAR sqlstate[6] = "00000";
+        SQLCHAR errmsg[1024] = "";
+        SQLINTEGER native_error = 0;
+        SQLSMALLINT errmsg_len = 0;
+        char error_buf[1200];
+        SQLRETURN diag_ret;
+        
+        diag_ret = SQLGetDiagRec(SQL_HANDLE_STMT, hstmt, 1, 
+                      sqlstate, &native_error, errmsg, sizeof(errmsg), &errmsg_len);
+        
+        if (diag_ret == SQL_SUCCESS || diag_ret == SQL_SUCCESS_WITH_INFO) {
+            snprintf(error_buf, sizeof(error_buf), 
+                     "SQL error [%s] (%d): %s", sqlstate, (int)native_error, errmsg);
+        } else {
+            snprintf(error_buf, sizeof(error_buf), 
+                     "SQL execution failed (ret=%d, no diagnostic available)", (int)ret);
+        }
+        
         SQLFreeHandle(SQL_HANDLE_STMT, hstmt);
-        Tcl_SetResult(interp, "Failed to execute SQL", TCL_STATIC);
+        Tcl_SetResult(interp, error_buf, TCL_VOLATILE);
         return TCL_ERROR;
     }
     
